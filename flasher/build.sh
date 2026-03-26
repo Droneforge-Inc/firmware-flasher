@@ -6,6 +6,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 MODE="native"
 PYTHON_BIN="${PYTHON_BIN:-}"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
+PYINSTALLER_CONFIG_DIR="${PYINSTALLER_CONFIG_DIR:-$ROOT_DIR/.pyinstaller}"
 
 usage() {
     cat <<'EOF'
@@ -53,13 +54,6 @@ done
 PYINSTALLER_ARGS=(
     --clean
     --noconfirm
-    --onefile
-    --name
-    flash-helper
-    --paths
-    "$ROOT_DIR"
-    --collect-all
-    esptool
 )
 
 case "$MODE" in
@@ -67,12 +61,13 @@ case "$MODE" in
         if [[ -z "$PYTHON_BIN" ]]; then
             PYTHON_BIN="python3"
         fi
+        unset FLASH_HELPER_TARGET_ARCH || true
         ;;
     universal|universal2)
         if [[ -z "$PYTHON_BIN" ]]; then
             PYTHON_BIN="/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"
         fi
-        PYINSTALLER_ARGS+=(--target-arch universal2)
+        export FLASH_HELPER_TARGET_ARCH="universal2"
         ;;
     *)
         echo "Invalid mode: $MODE" >&2
@@ -89,8 +84,11 @@ fi
 echo "Mode: $MODE"
 echo "Python: $PYTHON_BIN"
 echo "Venv: $VENV_DIR"
+echo "PyInstaller config: $PYINSTALLER_CONFIG_DIR"
 
 cd "$ROOT_DIR"
+
+mkdir -p "$PYINSTALLER_CONFIG_DIR"
 
 "$PYTHON_BIN" -m venv "$VENV_DIR"
 # shellcheck disable=SC1091
@@ -99,7 +97,8 @@ source "$VENV_DIR/bin/activate"
 python -m pip install -U pip
 python -m pip install -r requirements-build.txt
 
+PYINSTALLER_CONFIG_DIR="$PYINSTALLER_CONFIG_DIR" \
 PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-    pyinstaller "${PYINSTALLER_ARGS[@]}" simple_usb_upload.py
+    pyinstaller "${PYINSTALLER_ARGS[@]}" flash-helper.spec
 
 echo "Built: $ROOT_DIR/dist/flash-helper"
