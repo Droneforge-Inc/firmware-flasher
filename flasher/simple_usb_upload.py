@@ -2,14 +2,13 @@
 
 import argparse
 import os
-import platform
-import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from betaflight_passthrough import prepare_passthrough
+from bundled_tools import build_dfu_env, resolve_dfu_util
 
 
 FLASHER_ROOT = Path(__file__).resolve().parent
@@ -93,73 +92,6 @@ def default_bootloader_addr(chip):
     if chip in ("esp32-c3", "esp32-s3"):
         return BOOTLOADER_ADDR_S3
     return BOOTLOADER_ADDR
-
-
-def first_existing(paths):
-    for path in paths:
-        if path.exists():
-            return path
-    return None
-
-
-def normalized_machine():
-    machine = platform.machine().lower()
-    aliases = {
-        "amd64": "x86_64",
-        "x64": "x86_64",
-        "aarch64": "arm64",
-    }
-    return aliases.get(machine, machine)
-
-
-def dfu_search_paths():
-    executable = "dfu-util.exe" if os.name == "nt" else "dfu-util"
-    platform_name = platform.system().lower()
-    machine = normalized_machine()
-    base = resource_path("flasher", "vendor", "dfu-util")
-    variants = [f"{platform_name}-{machine}"]
-    if platform_name == "darwin":
-        variants.insert(0, f"macos-{machine}")
-    return [base / variant / executable for variant in variants] + [base / executable]
-
-
-def resolve_dfu_util(path_arg):
-    if path_arg is not None:
-        path = Path(path_arg).expanduser().resolve()
-        if not path.exists():
-            raise FileNotFoundError(f"dfu-util not found: {path}")
-        return path
-
-    bundled = first_existing(dfu_search_paths())
-    if bundled is not None:
-        return bundled
-
-    system_path = shutil.which("dfu-util")
-    if system_path:
-        return Path(system_path).resolve()
-
-    searched = ", ".join(str(path) for path in dfu_search_paths())
-    raise FileNotFoundError(
-        "dfu-util not found. Pass --dfu-util or bundle it under one of: "
-        + searched
-    )
-
-
-def prepend_env_path(env, key, value):
-    current = env.get(key)
-    env[key] = value if not current else value + os.pathsep + current
-
-
-def build_dfu_env(dfu_util):
-    env = os.environ.copy()
-    tool_dir = str(dfu_util.parent)
-    if sys.platform == "darwin":
-        prepend_env_path(env, "DYLD_LIBRARY_PATH", tool_dir)
-    elif os.name == "nt":
-        prepend_env_path(env, "PATH", tool_dir)
-    else:
-        prepend_env_path(env, "LD_LIBRARY_PATH", tool_dir)
-    return env
 
 
 def stream_subprocess_output(cmd, env):
@@ -411,7 +343,7 @@ def main():
 
         firmware = Path(args.firmware).expanduser().resolve()
         config_file = Path(args.config).expanduser().resolve()
-        dfu_util = resolve_dfu_util(args.dfu_util)
+        dfu_util = resolve_dfu_util(args.dfu_util, resource_path("flasher", "vendor", "dfu-util"))
 
         if not firmware.exists():
             raise FileNotFoundError(f"Firmware not found: {firmware}")

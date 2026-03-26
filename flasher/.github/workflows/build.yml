@@ -1,0 +1,44 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: flash-helper-linux
+            artifact_path: dist/flash-helper
+          - os: macos-latest
+            artifact_name: flash-helper-macos
+            artifact_path: dist/flash-helper
+          - os: windows-latest
+            artifact_name: flash-helper-windows
+            artifact_path: dist/flash-helper.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Build native artifact
+        run: python build.py --mode native --venv .venv-ci
+
+      - name: Smoke test built binary
+        run: ${{ matrix.artifact_path }} --help
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
