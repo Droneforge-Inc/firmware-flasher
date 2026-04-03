@@ -26,7 +26,7 @@ Defaults:
 
 Options:
   -n, --dry-run              Show what would change without writing files
-  --fc TYPE                  Betaflight FC filter: betafpv, axis, or all
+  --fc TYPE                  Betaflight FC filter: betafpv, axis, lionbee, or all
   --betaflight-dir PATH      Override the sibling Betaflight repo path
   --expresslrs-dir PATH      Override the sibling ExpressLRS repo path
   --nimbus-build-dir PATH    Override the Nimbus ELRS build output directory
@@ -37,8 +37,10 @@ Options:
 Environment overrides:
   BETAFPV_HEX_SOURCE
   AXIS_HEX_SOURCE
+  LIONBEE_HEX_SOURCE
   BETAFPV_CONFIG_SOURCE
   AXIS_CONFIG_SOURCE
+  LIONBEE_CONFIG_SOURCE
   NIMBUS_BOOTLOADER_SOURCE
   NIMBUS_PARTITIONS_SOURCE
   NIMBUS_BOOT_APP0_SOURCE
@@ -52,6 +54,7 @@ Examples:
   $(basename "$0") --dry-run
   $(basename "$0") betaflight --fc betafpv
   $(basename "$0") betaflight --fc axis
+  $(basename "$0") betaflight --fc lionbee
   $(basename "$0") elrs
 EOF
 }
@@ -119,11 +122,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$FC_TYPE" in
-	betafpv|axis|all)
+	betafpv|axis|lionbee|all)
 		;;
 	*)
 		echo "Invalid --fc value: $FC_TYPE" >&2
-		echo "Expected betafpv, axis, or all." >&2
+		echo "Expected betafpv, axis, lionbee, or all." >&2
 		exit 1
 		;;
 esac
@@ -137,8 +140,10 @@ DRONE_BUILD_DIR="${DRONE_BUILD_DIR:-$EXPRESSLRS_DIR/src/.pio/build/Unified_ESP82
 # ../betaflight/utils/scripts/flash_and_config.sh.
 BETAFPV_HEX_SOURCE="${BETAFPV_HEX_SOURCE:-$BETAFLIGHT_DIR/obj/betaflight_4.5.2_STM32G47X_BETAFPVG473.hex}"
 AXIS_HEX_SOURCE="${AXIS_HEX_SOURCE:-$BETAFLIGHT_DIR/obj/betaflight_4.5.2_STM32F7X2_AXISFLYINGF7AIO.hex}"
+LIONBEE_HEX_SOURCE="${LIONBEE_HEX_SOURCE:-$BETAFLIGHT_DIR/obj/betaflight_4.5.2_LIONBEE_V2_REVB.hex}"
 BETAFPV_CONFIG_SOURCE="${BETAFPV_CONFIG_SOURCE:-$BETAFLIGHT_DIR/utils/config/whoop-of.txt}"
 AXIS_CONFIG_SOURCE="${AXIS_CONFIG_SOURCE:-$BETAFLIGHT_DIR/utils/config/axis-of.txt}"
+LIONBEE_CONFIG_SOURCE="${LIONBEE_CONFIG_SOURCE:-$BETAFLIGHT_DIR/utils/config/lionbee.txt}"
 
 # Nimbus defaults to the ESP32-S3 TX build documented in ../ExpressLRS/README.md.
 NIMBUS_BOOTLOADER_SOURCE="${NIMBUS_BOOTLOADER_SOURCE:-$NIMBUS_BUILD_DIR/bootloader.bin}"
@@ -201,6 +206,10 @@ if (( INCLUDE_BETAFLIGHT )); then
 	if [[ "$FC_TYPE" == "axis" || "$FC_TYPE" == "all" ]]; then
 		add_asset "hex_to_bin" "$AXIS_HEX_SOURCE" "$DEST_ROOT/betaflight/bin/axis.bin" "Betaflight Axis firmware"
 		add_asset "copy" "$AXIS_CONFIG_SOURCE" "$DEST_ROOT/betaflight/config/axis-of.txt" "Betaflight Axis config"
+	fi
+	if [[ "$FC_TYPE" == "lionbee" || "$FC_TYPE" == "all" ]]; then
+		add_asset "hex_to_bin" "$LIONBEE_HEX_SOURCE" "$DEST_ROOT/betaflight/bin/lionbee.bin" "Betaflight Lionbee firmware"
+		add_asset "copy" "$LIONBEE_CONFIG_SOURCE" "$DEST_ROOT/betaflight/config/lionbee.txt" "Betaflight Lionbee config"
 	fi
 fi
 
