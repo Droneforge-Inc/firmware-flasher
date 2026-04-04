@@ -39,6 +39,22 @@ FC_BOOTLOADER_DELAY = 1.0
 FC_REBOOT_DELAY = 5.0
 
 
+class FlashStepError(RuntimeError):
+    def __init__(self, step, exc, details=None):
+        self.step = step
+        self.exc = exc
+        self.details = details or {}
+        super().__init__(self._build_message())
+
+    def _build_message(self):
+        detail_parts = [f"{key}={value}" for key, value in self.details.items()]
+        detail_suffix = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        return (
+            f"{self.step} failed{detail_suffix}: "
+            f"{type(self.exc).__name__}: {self.exc}"
+        )
+
+
 def parse_address(value):
     return int(value, 0)
 
@@ -92,6 +108,32 @@ def default_bootloader_addr(chip):
     if chip in ("esp32-c3", "esp32-s3"):
         return BOOTLOADER_ADDR_S3
     return BOOTLOADER_ADDR
+
+
+def wrap_step(step, func, details=None):
+    try:
+        return func()
+    except FlashStepError:
+        raise
+    except Exception as exc:
+        raise FlashStepError(step, exc, details) from exc
+
+
+def should_retry_linux_passthrough(exc):
+    if not sys.platform.startswith("linux"):
+        return False
+    if not isinstance(exc, FlashStepError):
+        return False
+    if exc.step != "Enable Betaflight serial passthrough":
+        return False
+
+    root_exc = exc.exc
+    errno_value = getattr(root_exc, "errno", None)
+    if errno_value == 22:
+        return True
+
+    message = str(root_exc)
+    return "Invalid argument" in message or "(22," in message
 
 
 def stream_subprocess_output(cmd, env):
@@ -355,10 +397,27 @@ def main():
         print(f"Port: {args.port} @ {cli_baud}")
         print(f"DFU util: {dfu_util}")
 
-        put_fc_in_bootloader(args.port, cli_baud)
-        run_dfu_flash(dfu_util, firmware)
+        fc_details = {
+            "target": args.target,
+            "port": args.port,
+            "baud": cli_baud,
+        }
+        wrap_step(
+            "Enter FC bootloader",
+            lambda: put_fc_in_bootloader(args.port, cli_baud),
+            fc_details,
+        )
+        wrap_step(
+            "Flash FC firmware over DFU",
+            lambda: run_dfu_flash(dfu_util, firmware),
+            {**fc_details, "firmware": firmware.name},
+        )
         time.sleep(FC_REBOOT_DELAY)
-        apply_fc_config(args.port, cli_baud, config_file)
+        wrap_step(
+            "Apply FC config",
+            lambda: apply_fc_config(args.port, cli_baud, config_file),
+            {**fc_details, "config": config_file.name},
+        )
         return 0
 
     baud = args.baud if args.baud is not None else (420000 if args.passthrough else 460800)
@@ -404,17 +463,51 @@ def main():
         if firmware is None:
             raise FileNotFoundError(f"RX flashing requires {FIRMWARE_NAME}")
         firmware_addr = args.firmware_addr if args.firmware_addr is not None else RX_FIRMWARE_ADDR
-        if args.passthrough:
-            prepare_passthrough(args.port, baud)
         cmd = build_rx_cmd(args.port, baud, chip, firmware, firmware_addr, args.passthrough)
 
     print(f"Target directory: {target_dir}")
     print(f"Chip: {chip}")
-    print(f"Port: {args.port} @ {baud}")
+    active_baud = baud
+    print(f"Port: {args.port} @ {active_baud}")
     if args.passthrough:
         print("Mode: Betaflight passthrough")
 
-    esptool.main(cmd)
+    elrs_details = {
+        "target": args.target,
+        "port": args.port,
+        "baud": active_baud,
+        "chip": chip,
+        "passthrough": args.passthrough,
+    }
+    if args.target == "rx" and args.passthrough:
+        try:
+            wrap_step(
+                "Enable Betaflight serial passthrough",
+                lambda: prepare_passthrough(args.port, active_baud),
+                elrs_details,
+            )
+        except FlashStepError as exc:
+            if should_retry_linux_passthrough(exc) and active_baud == 420000:
+                fallback_baud = 230400
+                print(
+                    "Linux serial driver rejected passthrough baud 420000; "
+                    f"retrying at {fallback_baud}."
+                )
+                active_baud = fallback_baud
+                elrs_details["baud"] = active_baud
+            else:
+                raise
+            wrap_step(
+                "Enable Betaflight serial passthrough",
+                lambda: prepare_passthrough(args.port, active_baud),
+                elrs_details,
+            )
+        cmd = build_rx_cmd(args.port, active_baud, chip, firmware, firmware_addr, args.passthrough)
+    wrap_step(
+        "Flash ELRS firmware with esptool",
+        lambda: esptool.main(cmd),
+        elrs_details,
+    )
     return 0
 
 
