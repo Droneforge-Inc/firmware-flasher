@@ -38,14 +38,7 @@ FC_DFU_ADDRESS = "0x08000000:leave"
 FC_CLI_BAUD = 115200
 FC_BOOTLOADER_DELAY = 1.0
 FC_REBOOT_DELAY = 5.0
-FC_DFU_ID = "df11"
-FC_DFU_WAIT_TIMEOUT = 10.0
-FC_DFU_POLL_INTERVAL = 0.25
-
-DFU_LIST_PATTERN = re.compile(
-    r"Found DFU:\s+\[(?P<vid>[0-9a-fA-F]{4}):(?P<pid>[0-9a-fA-F]{4})\]"
-    r"(?:.*?path=\"(?P<path>[^\"]+)\")?"
-)
+RX_PASSTHROUGH_BAUD_CANDIDATES = (420000, 230400, 115200)
 
 
 class FlashStepError(RuntimeError):
@@ -145,6 +138,18 @@ def should_retry_linux_passthrough(exc):
     return "Invalid argument" in message or "(22," in message
 
 
+def should_retry_passthrough_esptool(exc):
+    if not isinstance(exc, FlashStepError):
+        return False
+    if exc.step != "Flash ELRS firmware with esptool":
+        return False
+
+    root_exc = exc.exc
+    if root_exc.__class__.__name__ != "UnsupportedCommandError":
+        return False
+    return "Invalid (unsupported) command 0x8" in str(root_exc)
+
+
 def stream_subprocess_output(cmd, env):
     process = subprocess.Popen(
         cmd,
@@ -167,92 +172,81 @@ def stream_subprocess_output(cmd, env):
 
 
 def parse_dfu_devices(output):
-    devices = []
+    devices = {}
     for line in output.splitlines():
-        match = DFU_LIST_PATTERN.search(line)
+        if "Found DFU:" not in line:
+            continue
+        match = re.search(
+            (
+                r"\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\].*"
+                r'path="([^"]+)".*'
+                r'serial="([^"]*)"'
+            ),
+            line,
+        )
         if match is None:
             continue
-        devices.append(
-            {
-                "vid": match.group("vid").lower(),
-                "pid": match.group("pid").lower(),
-                "path": match.group("path"),
-                "line": line.strip(),
-            }
-        )
-    return devices
+        usb_id, path, serial = match.groups()
+        key = (usb_id.lower(), path, serial)
+        devices[key] = {
+            "usb_id": usb_id.lower(),
+            "path": path,
+            "serial": serial,
+        }
+    return list(devices.values())
 
 
 def list_dfu_devices(dfu_util):
-    cmd = [str(dfu_util), "-l"]
     result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        [str(dfu_util), "-l"],
+        check=True,
+        capture_output=True,
         text=True,
         env=build_dfu_env(dfu_util),
-        check=False,
     )
-    if result.returncode != 0:
-        raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout)
     return parse_dfu_devices(result.stdout)
 
 
-def select_fc_dfu_device(devices):
-    candidates = [
+def select_fc_dfu_target(before_devices, after_devices):
+    before_keys = {
+        (device["usb_id"], device["path"], device["serial"])
+        for device in before_devices
+    }
+    new_devices = [
         device
-        for device in devices
-        if FC_DFU_ID in (device["vid"], device["pid"])
+        for device in after_devices
+        if (device["usb_id"], device["path"], device["serial"]) not in before_keys
     ]
-    if not candidates:
-        return None
 
-    return min(
-        candidates,
-        key=lambda device: (
-            device["pid"] != FC_DFU_ID,
-            device["vid"] != "0483",
-            device["vid"],
-            device["pid"],
-            device.get("path") or "",
-        ),
-    )
+    if len(new_devices) == 1:
+        target = new_devices[0]
+        if target["serial"]:
+            return ["-d", target["usb_id"], "-S", target["serial"]]
+        return ["-d", target["usb_id"]]
 
+    if not new_devices and len(after_devices) == 1:
+        target = after_devices[0]
+        if target["serial"]:
+            return ["-d", target["usb_id"], "-S", target["serial"]]
+        return ["-d", target["usb_id"]]
 
-def format_dfu_device(device):
-    suffix = f" path={device['path']}" if device.get("path") else ""
-    return f"{device['vid']}:{device['pid']}{suffix}"
-
-
-def wait_for_fc_dfu_device(dfu_util, timeout=FC_DFU_WAIT_TIMEOUT, poll_interval=FC_DFU_POLL_INTERVAL):
-    deadline = time.time() + timeout
-    last_devices = []
-    while time.time() < deadline:
-        last_devices = list_dfu_devices(dfu_util)
-        device = select_fc_dfu_device(last_devices)
-        if device is not None:
-            return device
-        time.sleep(poll_interval)
-
-    if last_devices:
-        detected = ", ".join(f"{device['vid']}:{device['pid']}" for device in last_devices)
+    if not new_devices:
         raise RuntimeError(
-            f"No DFU device with vid/pid {FC_DFU_ID} found. Detected DFU devices: {detected}"
+            "Could not identify a newly appeared DFU device after entering FC bootloader"
         )
-    raise RuntimeError(f"No DFU device with vid/pid {FC_DFU_ID} found.")
+
+    candidates = ", ".join(
+        f'{device["usb_id"]} path={device["path"]} serial={device["serial"] or "<none>"}'
+        for device in new_devices
+    )
+    raise RuntimeError(f"Multiple new DFU devices appeared after bootloader entry: {candidates}")
 
 
-def build_dfu_device_args(device):
-    args = ["-d", f"{device['vid']}:{device['pid']}"]
-    if device.get("path"):
-        args.extend(["-p", device["path"]])
-    return args
-
-
-def run_dfu_flash(dfu_util, firmware, dfu_device):
+def run_dfu_flash(dfu_util, firmware, before_devices):
+    after_devices = list_dfu_devices(dfu_util)
     cmd = [
         str(dfu_util),
-        *build_dfu_device_args(dfu_device),
+        *select_fc_dfu_target(before_devices, after_devices),
         "-a",
         "0",
         "-s",
@@ -489,6 +483,7 @@ def main():
         print(f"Config: {config_file}")
         print(f"Port: {args.port} @ {cli_baud}")
         print(f"DFU util: {dfu_util}")
+        dfu_devices_before = list_dfu_devices(dfu_util)
 
         fc_details = {
             "target": args.target,
@@ -500,20 +495,10 @@ def main():
             lambda: put_fc_in_bootloader(args.port, cli_baud),
             fc_details,
         )
-        dfu_device = wrap_step(
-            "Detect FC DFU device",
-            lambda: wait_for_fc_dfu_device(dfu_util),
-            fc_details,
-        )
-        print(f"Selected DFU device: {format_dfu_device(dfu_device)}")
         wrap_step(
             "Flash FC firmware over DFU",
-            lambda: run_dfu_flash(dfu_util, firmware, dfu_device),
-            {
-                **fc_details,
-                "firmware": firmware.name,
-                "dfu_device": format_dfu_device(dfu_device),
-            },
+            lambda: run_dfu_flash(dfu_util, firmware, dfu_devices_before),
+            {**fc_details, "firmware": firmware.name},
         )
         time.sleep(FC_REBOOT_DELAY)
         wrap_step(
@@ -583,29 +568,64 @@ def main():
         "passthrough": args.passthrough,
     }
     if args.target == "rx" and args.passthrough:
-        try:
-            wrap_step(
-                "Enable Betaflight serial passthrough",
-                lambda: prepare_passthrough(args.port, active_baud),
-                elrs_details,
-            )
-        except FlashStepError as exc:
-            if should_retry_linux_passthrough(exc) and active_baud == 420000:
-                fallback_baud = 230400
-                print(
-                    "Linux serial driver rejected passthrough baud 420000; "
-                    f"retrying at {fallback_baud}."
+        tried_bauds = set()
+        candidate_bauds = [active_baud]
+        candidate_bauds.extend(
+            baud_candidate
+            for baud_candidate in RX_PASSTHROUGH_BAUD_CANDIDATES
+            if baud_candidate not in candidate_bauds
+        )
+
+        last_exc = None
+        for candidate_baud in candidate_bauds:
+            if candidate_baud in tried_bauds:
+                continue
+            tried_bauds.add(candidate_baud)
+            active_baud = candidate_baud
+            elrs_details["baud"] = active_baud
+
+            if candidate_baud != baud:
+                print(f"Retrying RX passthrough at {candidate_baud}.")
+
+            try:
+                wrap_step(
+                    "Enable Betaflight serial passthrough",
+                    lambda: prepare_passthrough(args.port, active_baud),
+                    elrs_details,
                 )
-                active_baud = fallback_baud
-                elrs_details["baud"] = active_baud
-            else:
+            except FlashStepError as exc:
+                last_exc = exc
+                if should_retry_linux_passthrough(exc):
+                    if candidate_baud == 420000:
+                        print(
+                            "Linux serial driver rejected passthrough baud 420000; "
+                            "retrying at 230400."
+                        )
+                    continue
                 raise
-            wrap_step(
-                "Enable Betaflight serial passthrough",
-                lambda: prepare_passthrough(args.port, active_baud),
-                elrs_details,
-            )
-        cmd = build_rx_cmd(args.port, active_baud, chip, firmware, firmware_addr, args.passthrough)
+
+            cmd = build_rx_cmd(args.port, active_baud, chip, firmware, firmware_addr, args.passthrough)
+            try:
+                wrap_step(
+                    "Flash ELRS firmware with esptool",
+                    lambda: esptool.main(cmd),
+                    elrs_details,
+                )
+                return 0
+            except FlashStepError as exc:
+                last_exc = exc
+                if should_retry_passthrough_esptool(exc):
+                    print(
+                        "RX did not enter bootloader cleanly at "
+                        f"{active_baud}; retrying with a lower passthrough baud."
+                    )
+                    continue
+                raise
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("RX passthrough flashing failed before esptool could run")
+
     wrap_step(
         "Flash ELRS firmware with esptool",
         lambda: esptool.main(cmd),
