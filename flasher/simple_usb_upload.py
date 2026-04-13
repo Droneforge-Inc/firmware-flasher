@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -37,6 +38,14 @@ FC_DFU_ADDRESS = "0x08000000:leave"
 FC_CLI_BAUD = 115200
 FC_BOOTLOADER_DELAY = 1.0
 FC_REBOOT_DELAY = 5.0
+FC_DFU_ID = "df11"
+FC_DFU_WAIT_TIMEOUT = 10.0
+FC_DFU_POLL_INTERVAL = 0.25
+
+DFU_LIST_PATTERN = re.compile(
+    r"Found DFU:\s+\[(?P<vid>[0-9a-fA-F]{4}):(?P<pid>[0-9a-fA-F]{4})\]"
+    r"(?:.*?path=\"(?P<path>[^\"]+)\")?"
+)
 
 
 class FlashStepError(RuntimeError):
@@ -157,9 +166,93 @@ def stream_subprocess_output(cmd, env):
     return process.wait(), b"".join(chunks).decode("utf-8", errors="ignore")
 
 
-def run_dfu_flash(dfu_util, firmware):
+def parse_dfu_devices(output):
+    devices = []
+    for line in output.splitlines():
+        match = DFU_LIST_PATTERN.search(line)
+        if match is None:
+            continue
+        devices.append(
+            {
+                "vid": match.group("vid").lower(),
+                "pid": match.group("pid").lower(),
+                "path": match.group("path"),
+                "line": line.strip(),
+            }
+        )
+    return devices
+
+
+def list_dfu_devices(dfu_util):
+    cmd = [str(dfu_util), "-l"]
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=build_dfu_env(dfu_util),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout)
+    return parse_dfu_devices(result.stdout)
+
+
+def select_fc_dfu_device(devices):
+    candidates = [
+        device
+        for device in devices
+        if FC_DFU_ID in (device["vid"], device["pid"])
+    ]
+    if not candidates:
+        return None
+
+    return min(
+        candidates,
+        key=lambda device: (
+            device["pid"] != FC_DFU_ID,
+            device["vid"] != "0483",
+            device["vid"],
+            device["pid"],
+            device.get("path") or "",
+        ),
+    )
+
+
+def format_dfu_device(device):
+    suffix = f" path={device['path']}" if device.get("path") else ""
+    return f"{device['vid']}:{device['pid']}{suffix}"
+
+
+def wait_for_fc_dfu_device(dfu_util, timeout=FC_DFU_WAIT_TIMEOUT, poll_interval=FC_DFU_POLL_INTERVAL):
+    deadline = time.time() + timeout
+    last_devices = []
+    while time.time() < deadline:
+        last_devices = list_dfu_devices(dfu_util)
+        device = select_fc_dfu_device(last_devices)
+        if device is not None:
+            return device
+        time.sleep(poll_interval)
+
+    if last_devices:
+        detected = ", ".join(f"{device['vid']}:{device['pid']}" for device in last_devices)
+        raise RuntimeError(
+            f"No DFU device with vid/pid {FC_DFU_ID} found. Detected DFU devices: {detected}"
+        )
+    raise RuntimeError(f"No DFU device with vid/pid {FC_DFU_ID} found.")
+
+
+def build_dfu_device_args(device):
+    args = ["-d", f"{device['vid']}:{device['pid']}"]
+    if device.get("path"):
+        args.extend(["-p", device["path"]])
+    return args
+
+
+def run_dfu_flash(dfu_util, firmware, dfu_device):
     cmd = [
         str(dfu_util),
+        *build_dfu_device_args(dfu_device),
         "-a",
         "0",
         "-s",
@@ -407,10 +500,20 @@ def main():
             lambda: put_fc_in_bootloader(args.port, cli_baud),
             fc_details,
         )
+        dfu_device = wrap_step(
+            "Detect FC DFU device",
+            lambda: wait_for_fc_dfu_device(dfu_util),
+            fc_details,
+        )
+        print(f"Selected DFU device: {format_dfu_device(dfu_device)}")
         wrap_step(
             "Flash FC firmware over DFU",
-            lambda: run_dfu_flash(dfu_util, firmware),
-            {**fc_details, "firmware": firmware.name},
+            lambda: run_dfu_flash(dfu_util, firmware, dfu_device),
+            {
+                **fc_details,
+                "firmware": firmware.name,
+                "dfu_device": format_dfu_device(dfu_device),
+            },
         )
         time.sleep(FC_REBOOT_DELAY)
         wrap_step(
