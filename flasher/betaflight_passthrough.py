@@ -111,4 +111,5 @@ def prepare_passthrough(port, baudrate):
         bf_passthrough_init(port, baudrate)
     except PassthroughEnabled:
         pass
+    time.sleep(0.3)
     reset_rx_to_bootloader(port, baudrate)
