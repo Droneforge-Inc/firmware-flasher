@@ -106,10 +106,12 @@ def reset_rx_to_bootloader(port, baudrate):
     serial_port.close()
 
 
-def prepare_passthrough(port, baudrate):
+def prepare_passthrough(port, passthrough_baudrate, host_baudrate=None):
+    if host_baudrate is None:
+        host_baudrate = passthrough_baudrate
     try:
-        bf_passthrough_init(port, baudrate)
+        bf_passthrough_init(port, passthrough_baudrate)
     except PassthroughEnabled:
         pass
     time.sleep(0.3)
-    reset_rx_to_bootloader(port, baudrate)
+    reset_rx_to_bootloader(port, host_baudrate)

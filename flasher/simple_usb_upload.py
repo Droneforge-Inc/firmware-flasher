@@ -38,7 +38,15 @@ FC_DFU_ADDRESS = "0x08000000:leave"
 FC_CLI_BAUD = 115200
 FC_BOOTLOADER_DELAY = 3.0
 FC_REBOOT_DELAY = 5.0
+FC_POST_SAVE_REBOOT_DELAY = 0.8
 RX_PASSTHROUGH_BAUD_CANDIDATES = (420000, 230400, 115200)
+EXIT_GENERAL_FAILURE = 1
+EXIT_RX_PASSTHROUGH_SETUP = 20
+EXIT_RX_BOOTLOADER_SYNC = 21
+EXIT_RX_UPLOAD = 22
+EXIT_FC_BOOTLOADER = 30
+EXIT_FC_DFU = 31
+EXIT_FC_CONFIG = 32
 
 
 class FlashStepError(RuntimeError):
@@ -146,8 +154,60 @@ def should_retry_passthrough_esptool(exc):
 
     root_exc = exc.exc
     if root_exc.__class__.__name__ != "UnsupportedCommandError":
-        return False
+        return is_esptool_bootloader_sync_error(root_exc)
     return "Invalid (unsupported) command 0x8" in str(root_exc)
+
+
+def is_esptool_bootloader_sync_error(exc):
+    message = str(exc).lower()
+    return (
+        "failed to connect" in message
+        or "invalid head of packet" in message
+        or "timed out waiting for packet header" in message
+        or "no serial data received" in message
+        or "serial noise or corruption" in message
+    )
+
+
+def classify_exit_code(exc):
+    if not isinstance(exc, FlashStepError):
+        return EXIT_GENERAL_FAILURE
+
+    if exc.step == "Enable Betaflight serial passthrough":
+        return EXIT_RX_PASSTHROUGH_SETUP
+    if exc.step == "Flash ELRS firmware with esptool":
+        if exc.details.get("target") == "rx" and exc.details.get("passthrough"):
+            if is_esptool_bootloader_sync_error(exc.exc):
+                return EXIT_RX_BOOTLOADER_SYNC
+            return EXIT_RX_UPLOAD
+        return EXIT_GENERAL_FAILURE
+    if exc.step == "Enter FC bootloader":
+        return EXIT_FC_BOOTLOADER
+    if exc.step == "Flash FC firmware over DFU":
+        return EXIT_FC_DFU
+    if exc.step == "Apply FC config":
+        return EXIT_FC_CONFIG
+
+    return EXIT_GENERAL_FAILURE
+
+
+def print_failure_hint(exit_code):
+    if exit_code == EXIT_RX_BOOTLOADER_SYNC:
+        print(
+            "Hint: Betaflight passthrough opened, but the RX did not answer as an "
+            "ESP bootloader. Keep Nimbus plugged in, turn off the controller or "
+            "transmitter so the receiver is not actively linked, power-cycle the "
+            "FC and drone, make sure the receiver is powered, and use the receiver "
+            "boot button/jumper if the RX firmware may be corrupted. ELRS bind "
+            "mode is not the same as bootloader mode.",
+            file=sys.stderr,
+        )
+    elif exit_code == EXIT_RX_PASSTHROUGH_SETUP:
+        print(
+            "Hint: Check that the Betaflight Serial RX UART is enabled and that "
+            "serialrx_provider is CRSF/ELRS with inversion and half-duplex disabled.",
+            file=sys.stderr,
+        )
 
 
 def stream_subprocess_output(cmd, env):
@@ -344,6 +404,15 @@ def send_fc_command(serial_port, command, timeout=3.0, expect_prompt=True):
     return response
 
 
+def request_fc_reboot_after_save(serial_port):
+    time.sleep(FC_POST_SAVE_REBOOT_DELAY)
+    try:
+        print("> exit")
+        send_fc_command(serial_port, "exit", expect_prompt=False)
+    except (OSError, serial.SerialException) as exc:
+        print(f"FC serial disconnected after save; reboot likely started: {exc}")
+
+
 def print_cli_response(command, response):
     for line in response.splitlines():
         line = line.strip()
@@ -388,6 +457,7 @@ def apply_fc_config(port, baud, config_file):
             print_cli_response(command, response)
         print("> save")
         send_fc_command(serial_port, "save", expect_prompt=False)
+        request_fc_reboot_after_save(serial_port)
     finally:
         if serial_port.is_open:
             serial_port.close()
@@ -559,6 +629,7 @@ def main():
     print(f"Port: {args.port} @ {active_baud}")
     if args.passthrough:
         print("Mode: Betaflight passthrough")
+        print(f"Passthrough UART baud: {baud}")
 
     elrs_details = {
         "target": args.target,
@@ -569,6 +640,7 @@ def main():
     }
     if args.target == "rx" and args.passthrough:
         tried_bauds = set()
+        passthrough_baud = baud
         candidate_bauds = [active_baud]
         candidate_bauds.extend(
             baud_candidate
@@ -583,14 +655,19 @@ def main():
             tried_bauds.add(candidate_baud)
             active_baud = candidate_baud
             elrs_details["baud"] = active_baud
+            elrs_details["passthrough_baud"] = passthrough_baud
 
             if candidate_baud != baud:
-                print(f"Retrying RX passthrough at {candidate_baud}.")
+                print(f"Retrying RX passthrough host serial at {candidate_baud}.")
 
             try:
                 wrap_step(
                     "Enable Betaflight serial passthrough",
-                    lambda: prepare_passthrough(args.port, active_baud),
+                    lambda: prepare_passthrough(
+                        args.port,
+                        passthrough_baud,
+                        active_baud,
+                    ),
                     elrs_details,
                 )
             except FlashStepError as exc:
@@ -598,8 +675,9 @@ def main():
                 if should_retry_linux_passthrough(exc):
                     if candidate_baud == 420000:
                         print(
-                            "Linux serial driver rejected passthrough baud 420000; "
-                            "retrying at 230400."
+                            "Linux serial driver rejected host baud 420000 after "
+                            "Betaflight passthrough was opened at 420000; retrying "
+                            "the host side at 230400."
                         )
                     continue
                 raise
@@ -638,5 +716,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"Upload failed: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        exit_code = classify_exit_code(exc)
+        print(f"Upload failed [{exit_code}]: {exc}", file=sys.stderr)
+        print_failure_hint(exit_code)
+        raise SystemExit(exit_code)
