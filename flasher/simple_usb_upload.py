@@ -21,6 +21,20 @@ if str(FLASHER_ROOT) not in sys.path:
 import esptool
 import serial
 
+
+def trace(message):
+    print(f"[flash-trace {time.monotonic():.3f}] {message}", file=sys.stderr, flush=True)
+
+
+def format_dfu_devices(devices):
+    if not devices:
+        return "<none>"
+    return "; ".join(
+        f'{device["usb_id"]} path={device["path"]} serial={device["serial"] or "<none>"}'
+        for device in devices
+    )
+
+
 BOOTLOADER_ADDR = 0x1000
 BOOTLOADER_ADDR_S3 = 0x0000
 PARTITIONS_ADDR = 0x8000
@@ -239,7 +253,7 @@ def parse_dfu_devices(output):
         match = re.search(
             (
                 r"\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\].*"
-                r'path="([^"]+)".*'
+                r'path="([^"]*)".*'
                 r'serial="([^"]*)"'
             ),
             line,
@@ -257,6 +271,7 @@ def parse_dfu_devices(output):
 
 
 def list_dfu_devices(dfu_util):
+    trace(f"running dfu-util list command: {dfu_util} -l")
     result = subprocess.run(
         [str(dfu_util), "-l"],
         check=True,
@@ -264,6 +279,8 @@ def list_dfu_devices(dfu_util):
         text=True,
         env=build_dfu_env(dfu_util),
     )
+    trace(f"dfu-util -l stdout:\n{result.stdout.rstrip() or '<empty>'}")
+    trace(f"dfu-util -l stderr:\n{result.stderr.rstrip() or '<empty>'}")
     return parse_dfu_devices(result.stdout)
 
 
@@ -303,10 +320,20 @@ def select_fc_dfu_target(before_devices, after_devices):
 
 
 def run_dfu_flash(dfu_util, firmware, before_devices):
+    trace(
+        "post-bl dfu-util -l start "
+        f"(baseline={len(before_devices)} device(s): {format_dfu_devices(before_devices)})"
+    )
     after_devices = list_dfu_devices(dfu_util)
+    trace(
+        "post-bl dfu-util -l parsed "
+        f"{len(after_devices)} device(s): {format_dfu_devices(after_devices)}"
+    )
+    dfu_target_args = select_fc_dfu_target(before_devices, after_devices)
+    trace(f"selected dfu target args: {dfu_target_args}")
     cmd = [
         str(dfu_util),
-        *select_fc_dfu_target(before_devices, after_devices),
+        *dfu_target_args,
         "-a",
         "0",
         "-s",
@@ -433,13 +460,17 @@ def load_config_commands(config_file):
 
 
 def put_fc_in_bootloader(port, baud):
+    trace("connecting to FC CLI")
     print("Connecting to FC CLI...")
     serial_port = connect_fc_cli(port, baud, 10.0)
     try:
+        trace("sending bl")
         print("> bl")
         send_fc_command(serial_port, "bl", expect_prompt=False)
+        trace("sent bl")
     finally:
         serial_port.close()
+    trace(f"sleeping {FC_BOOTLOADER_DELAY}s after bl")
     time.sleep(FC_BOOTLOADER_DELAY)
 
 
@@ -553,7 +584,12 @@ def main():
         print(f"Config: {config_file}")
         print(f"Port: {args.port} @ {cli_baud}")
         print(f"DFU util: {dfu_util}")
+        trace("pre-bl dfu-util -l start")
         dfu_devices_before = list_dfu_devices(dfu_util)
+        trace(
+            "pre-bl dfu-util -l parsed "
+            f"{len(dfu_devices_before)} device(s): {format_dfu_devices(dfu_devices_before)}"
+        )
 
         fc_details = {
             "target": args.target,
