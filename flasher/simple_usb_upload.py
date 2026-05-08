@@ -53,6 +53,8 @@ FC_CLI_BAUD = 115200
 FC_BOOTLOADER_DELAY = 3.0
 FC_REBOOT_DELAY = 5.0
 FC_POST_SAVE_REBOOT_DELAY = 0.8
+ELRS_POST_FLASH_RESET_DELAY = 0.1
+ELRS_POST_FLASH_BOOT_DELAY = 2.0
 RX_PASSTHROUGH_BAUD_CANDIDATES = (420000, 230400, 115200)
 EXIT_GENERAL_FAILURE = 1
 EXIT_RX_PASSTHROUGH_SETUP = 20
@@ -553,6 +555,27 @@ def build_tx_cmd(
     ]
 
 
+def reset_elrs_to_app(port):
+    print("Resetting ELRS module into application mode...")
+    with serial.Serial(
+        port=port,
+        baudrate=115200,
+        timeout=0.2,
+        write_timeout=0.2,
+        rtscts=False,
+        dsrdtr=False,
+    ) as serial_port:
+        # DTR/RTS are active-low on ESP auto-reset circuits. Keep GPIO0 released
+        # while pulsing EN so the chip boots the flashed application, not ROM.
+        serial_port.dtr = False
+        serial_port.rts = True
+        time.sleep(ELRS_POST_FLASH_RESET_DELAY)
+        serial_port.rts = False
+        serial_port.reset_input_buffer()
+        serial_port.reset_output_buffer()
+    time.sleep(ELRS_POST_FLASH_BOOT_DELAY)
+
+
 def main():
     args = parse_args()
     if args.target == "tx" and args.passthrough:
@@ -745,6 +768,12 @@ def main():
         lambda: esptool.main(cmd),
         elrs_details,
     )
+    if args.target == "tx":
+        wrap_step(
+            "Reset ELRS module after flashing",
+            lambda: reset_elrs_to_app(args.port),
+            elrs_details,
+        )
     return 0
 
 
