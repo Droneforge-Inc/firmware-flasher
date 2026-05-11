@@ -56,6 +56,7 @@ FC_POST_SAVE_REBOOT_DELAY = 0.8
 ELRS_POST_FLASH_RESET_DELAY = 0.1
 ELRS_POST_FLASH_BOOT_DELAY = 2.0
 RX_PASSTHROUGH_BAUD_CANDIDATES = (420000, 230400, 115200)
+RX_BIND_COMMAND = "bind_rx"
 EXIT_GENERAL_FAILURE = 1
 EXIT_RX_PASSTHROUGH_SETUP = 20
 EXIT_RX_BOOTLOADER_SYNC = 21
@@ -91,9 +92,19 @@ def resource_path(*parts):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Flash ELRS RX/TX binaries or Betaflight FC binaries."
+        description=(
+            "Flash ELRS RX/TX binaries, flash Betaflight FC binaries, "
+            "or send Betaflight CLI commands."
+        )
     )
-    parser.add_argument("--target", choices=("rx", "tx", "fc"), required=True)
+    parser.add_argument(
+        "command",
+        choices=("flash", "bind"),
+        nargs="?",
+        default="flash",
+        help="Operation to run. Defaults to flash.",
+    )
+    parser.add_argument("--target", choices=("rx", "tx", "fc"))
     parser.add_argument("--port", required=True)
     parser.add_argument("--baud", type=int, default=None)
     parser.add_argument("--bin-root", default=".")
@@ -496,6 +507,18 @@ def apply_fc_config(port, baud, config_file):
             serial_port.close()
 
 
+def bind_rx_via_fc_cli(port, baud):
+    print("Connecting to FC CLI...")
+    serial_port = connect_fc_cli(port, baud, 10.0)
+    try:
+        print(f"> {RX_BIND_COMMAND}")
+        response = send_fc_command(serial_port, RX_BIND_COMMAND, timeout=5.0)
+        print_cli_response(RX_BIND_COMMAND, response)
+    finally:
+        if serial_port.is_open:
+            serial_port.close()
+
+
 def build_rx_cmd(port, baud, chip, firmware, firmware_addr, passthrough):
     cmd = [
         "--chip",
@@ -578,6 +601,23 @@ def reset_elrs_to_app(port):
 
 def main():
     args = parse_args()
+    if args.command == "bind":
+        cli_baud = args.baud if args.baud is not None else FC_CLI_BAUD
+        bind_details = {
+            "command": RX_BIND_COMMAND,
+            "port": args.port,
+            "baud": cli_baud,
+        }
+        print(f"Port: {args.port} @ {cli_baud}")
+        wrap_step(
+            "Send RX bind command",
+            lambda: bind_rx_via_fc_cli(args.port, cli_baud),
+            bind_details,
+        )
+        return 0
+
+    if args.target is None:
+        raise ValueError("--target is required for flash")
     if args.target == "tx" and args.passthrough:
         raise ValueError("--passthrough is only supported for rx")
     if args.target == "fc" and args.passthrough:

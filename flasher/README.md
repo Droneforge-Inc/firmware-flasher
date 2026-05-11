@@ -107,6 +107,12 @@ RX via Betaflight passthrough:
 dist/flash-helper --target rx --port /dev/cu.usbmodem11401 --bin-root /path/to/rx/build --passthrough
 ```
 
+Start RX bind mode through Betaflight CLI:
+
+```bash
+dist/flash-helper bind --port /dev/cu.usbmodem11401
+```
+
 FC flash:
 
 ```bash
