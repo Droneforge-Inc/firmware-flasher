@@ -155,13 +155,18 @@ To make FC flashing self-contained inside the PyInstaller app, place platform-sp
 flasher/vendor/dfu-util/
 ```
 
-Example layouts:
+Example layouts (always ship **libusb next to** `dfu-util`):
 
 ```text
 flasher/vendor/dfu-util/macos-arm64/dfu-util
 flasher/vendor/dfu-util/macos-arm64/libusb-1.0.0.dylib
 flasher/vendor/dfu-util/linux-x86_64/dfu-util
+flasher/vendor/dfu-util/linux-x86_64/libusb-1.0.so.0
 flasher/vendor/dfu-util/windows-x86_64/dfu-util.exe
+flasher/vendor/dfu-util/windows-x86_64/libusb-1.0.dll
 ```
+
+When Nimbus passes a staged path (`stage/bin/dfu-util` with `stage/lib/libusb*`),
+`build_dfu_env()` prepends `../lib` then the tool dir so host libusb cannot win.
 
 At runtime the flasher checks `--dfu-util` first, then the bundled vendor directory, then `PATH`.

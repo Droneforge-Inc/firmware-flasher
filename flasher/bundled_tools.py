@@ -68,18 +68,56 @@ def prepend_env_path(env, key, value):
     env[key] = value if not current else value + os.pathsep + current
 
 
+def dfu_library_dirs(dfu_util):
+    """Directories that must be searched for the staged/vendored libusb.
+
+    Supported layouts:
+
+    1. Nimbus stage (cmake --install / backend-stage)::
+
+           stage/bin/dfu-util[.exe]
+           stage/lib/libusb-1.0.so* | libusb-1.0*.dylib
+
+    2. Vendored flasher bundle (next to the tool)::
+
+           vendor/dfu-util/<platform>/dfu-util
+           vendor/dfu-util/<platform>/libusb-1.0.0.dylib
+           vendor/dfu-util/<platform>/libusb-1.0.so.0
+           vendor/dfu-util/<platform>/libusb-1.0.dll
+
+    Older build_dfu_env only put the tool directory on LD_LIBRARY_PATH, so
+    Nimbus stage builds still resolved ambient host/Nix libusb via RUNPATH
+    + LD_LIBRARY_PATH order. Always prefer sibling lib/ then the tool dir.
+    """
+    tool_dir = Path(dfu_util).resolve().parent
+    lib_dir = tool_dir.parent / "lib"
+    dirs = []
+    # Prefer the sibling lib tree first (Nimbus stage layout).
+    if lib_dir.is_dir():
+        dirs.append(str(lib_dir))
+    # Then the tool directory itself (vendored layout + Windows DLL-next-to-exe).
+    dirs.append(str(tool_dir))
+    return dirs
+
+
 def build_dfu_env(dfu_util, platform_name=None, os_name=None):
+    """Environment for launching dfu-util with bundled libusb preferred.
+
+    Prepends library search paths so ambient host libraries cannot steal
+    libusb-1.0 from the staged or vendored bundle.
+    """
     env = os.environ.copy()
-    tool_dir = str(Path(dfu_util).parent)
     if platform_name is None:
         platform_name = sys.platform
     if os_name is None:
         os_name = os.name
 
-    if platform_name == "darwin":
-        prepend_env_path(env, "DYLD_LIBRARY_PATH", tool_dir)
-    elif os_name == "nt":
-        prepend_env_path(env, "PATH", tool_dir)
-    else:
-        prepend_env_path(env, "LD_LIBRARY_PATH", tool_dir)
+    # Prepend in reverse so the first library dir ends up first.
+    for directory in reversed(dfu_library_dirs(dfu_util)):
+        if platform_name == "darwin":
+            prepend_env_path(env, "DYLD_LIBRARY_PATH", directory)
+        elif os_name == "nt":
+            prepend_env_path(env, "PATH", directory)
+        else:
+            prepend_env_path(env, "LD_LIBRARY_PATH", directory)
     return env
