@@ -224,6 +224,7 @@ feature -ANTI_GRAVITY
 feature -OPTICALFLOW
 feature RX_SERIAL
 feature RANGEFINDER
+feature TELEMETRY
 feature OSD
 feature AIRMODE
 feature ANTI_GRAVITY

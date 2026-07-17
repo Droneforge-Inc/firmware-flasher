@@ -146,6 +146,9 @@ FC defaults:
 - `--firmware` is required
 - `--config` is required
 - `--dfu-util` overrides the bundled/system `dfu-util` path
+- When `beta_v2.txt` is requested, the helper runs Betaflight `tasks` before
+  applying any configuration. A GYRO task rate below 5000 Hz selects the
+  adjacent `beta_v2_bmi270.txt`; 5000 Hz or above keeps `beta_v2.txt`.
 
 ## Vendored dfu-util
 

@@ -53,6 +53,10 @@ FC_CLI_BAUD = 115200
 FC_BOOTLOADER_DELAY = 3.0
 FC_REBOOT_DELAY = 5.0
 FC_POST_SAVE_REBOOT_DELAY = 0.8
+FC_BMI_GYRO_RATE_THRESHOLD_HZ = 5000
+FC_LOW_RATE_CONFIGS = {
+    "beta_v2.txt": "beta_v2_bmi270.txt",
+}
 ELRS_POST_FLASH_RESET_DELAY = 0.1
 ELRS_POST_FLASH_BOOT_DELAY = 2.0
 RX_PASSTHROUGH_BAUD_CANDIDATES = (420000, 230400, 115200)
@@ -472,6 +476,46 @@ def load_config_commands(config_file):
         ]
 
 
+def parse_gyro_task_rate_hz(response):
+    match = re.search(
+        r"^\s*\d+\s*-\s*\(\s*GYRO\s*\)\s+(\d+)\b",
+        response,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def select_fc_config(serial_port, config_file):
+    low_rate_config_name = FC_LOW_RATE_CONFIGS.get(config_file.name.lower())
+    if low_rate_config_name is None:
+        return config_file
+
+    print("> tasks")
+    response = send_fc_command(serial_port, "tasks", timeout=5.0)
+    print_cli_response("tasks", response)
+
+    gyro_rate_hz = parse_gyro_task_rate_hz(response)
+    if gyro_rate_hz is None:
+        raise RuntimeError("Could not read the GYRO rate from Betaflight tasks output")
+
+    print(f"Detected Betaflight GYRO task rate: {gyro_rate_hz} Hz")
+    if gyro_rate_hz >= FC_BMI_GYRO_RATE_THRESHOLD_HZ:
+        print(f"Selected FC config: {config_file.name} (regular IMU)")
+        return config_file
+
+    low_rate_config = config_file.with_name(low_rate_config_name)
+    if not low_rate_config.is_file():
+        raise FileNotFoundError(
+            "BMI270 config is required for "
+            f"{gyro_rate_hz} Hz GYRO rate but was not found: {low_rate_config}"
+        )
+
+    print(f"Selected FC config: {low_rate_config.name} (BMI270)")
+    return low_rate_config
+
+
 def put_fc_in_bootloader(port, baud):
     trace("connecting to FC CLI")
     print("Connecting to FC CLI...")
@@ -488,13 +532,14 @@ def put_fc_in_bootloader(port, baud):
 
 
 def apply_fc_config(port, baud, config_file):
-    commands = load_config_commands(config_file)
-    if not commands:
-        raise ValueError(f"Config file is empty: {config_file}")
-
     print("Reconnecting to FC CLI for config...")
     serial_port = connect_fc_cli(port, baud, 20.0)
     try:
+        selected_config_file = select_fc_config(serial_port, config_file)
+        commands = load_config_commands(selected_config_file)
+        if not commands:
+            raise ValueError(f"Config file is empty: {selected_config_file}")
+
         for command in commands:
             print(f"> {command}")
             response = send_fc_command(serial_port, command)
