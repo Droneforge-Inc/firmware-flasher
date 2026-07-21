@@ -3,8 +3,7 @@
 # dump
 
 # version
-# Betaflight / STM32G47X (SG47) 4.5.4 Jun  2 2026 / 10:12:06 (norevision) MSP API: 1.46
-# config rev: 12d3a0a
+# Betaflight / STM32G47X (SG47) 4.5.4 Jul 21 2026 / 10:23:17 (norevision) MSP API: 1.46
 
 # start the command batch
 batch start
@@ -414,8 +413,8 @@ set yaw_spin_threshold = 1950
 set gyro_to_use = FIRST
 set dyn_notch_count = 2
 set dyn_notch_q = 450
-set dyn_notch_min_hz = 100
-set dyn_notch_max_hz = 500
+set dyn_notch_min_hz = 50
+set dyn_notch_max_hz = 250
 set gyro_lpf1_dyn_min_hz = 0
 set gyro_lpf1_dyn_max_hz = 550
 set gyro_lpf1_dyn_expo = 5
@@ -540,7 +539,7 @@ set beeper_od = OFF
 set beeper_frequency = 0
 set beeper_dshot_beacon_tone = 1
 set yaw_motors_reversed = ON
-set mixer_type = LEGACY
+set mixer_type = EZLANDING
 set crashflip_motor_percent = 0
 set crashflip_expo = 35
 set 3d_deadband_low = 1406
@@ -563,7 +562,6 @@ set small_angle = 180
 set imu_process_denom = 2
 set auto_disarm_delay = 5
 set gyro_cal_on_arm = ON
-set reset_kinematic_state_on_arm = ON
 set deadband = 0
 set yaw_deadband = 0
 set yaw_control_reversed = OFF
@@ -825,8 +823,8 @@ set dterm_lpf1_type = PT1
 set dterm_lpf1_static_hz = 75
 set dterm_lpf2_type = PT1
 set dterm_lpf2_static_hz = 150
-set dterm_notch_hz = 0
-set dterm_notch_cutoff = 0
+set dterm_notch_hz = 80
+set dterm_notch_cutoff = 55
 set vbat_sag_compensation = 0
 set pid_at_min_throttle = ON
 set anti_gravity_gain = 60
