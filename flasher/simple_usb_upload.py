@@ -103,7 +103,7 @@ def parse_args():
     )
     parser.add_argument(
         "command",
-        choices=("flash", "bind"),
+        choices=("flash", "bind", "enter-dfu"),
         nargs="?",
         default="flash",
         help="Operation to run. Defaults to flash.",
@@ -646,6 +646,17 @@ def reset_elrs_to_app(port):
 
 def main():
     args = parse_args()
+    if args.command == "enter-dfu":
+        cli_baud = args.baud if args.baud is not None else FC_CLI_BAUD
+        details = {"port": args.port, "baud": cli_baud}
+        print(f"Port: {args.port} @ {cli_baud}")
+        wrap_step(
+            "Enter FC bootloader",
+            lambda: put_fc_in_bootloader(args.port, cli_baud),
+            details,
+        )
+        return 0
+
     if args.command == "bind":
         cli_baud = args.baud if args.baud is not None else FC_CLI_BAUD
         bind_details = {
