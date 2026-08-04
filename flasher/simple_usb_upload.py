@@ -50,7 +50,9 @@ FIRMWARE_NAME = "firmware.bin"
 CHIPS = ("esp8266", "esp32", "esp32-c3", "esp32-s3")
 FC_DFU_ADDRESS = "0x08000000:leave"
 FC_CLI_BAUD = 115200
-FC_BOOTLOADER_DELAY = 5.0
+FC_DFU_POLL_INTERVAL = 0.25
+FC_DFU_WAIT_TIMEOUT = 15.0
+FC_DFU_LIST_TIMEOUT = 2.0
 FC_REBOOT_DELAY = 5.0
 FC_POST_SAVE_REBOOT_DELAY = 0.8
 FC_BMI_GYRO_RATE_THRESHOLD_HZ = 5000
@@ -287,19 +289,19 @@ def parse_dfu_devices(output):
     return list(devices.values())
 
 
-def list_dfu_devices(dfu_util):
+def list_dfu_devices(dfu_util, timeout=FC_DFU_LIST_TIMEOUT):
     trace(f"running dfu-util list command: {dfu_util} -l")
     result = subprocess.run(
         [str(dfu_util), "-l"],
         check=True,
         capture_output=True,
         text=True,
+        timeout=timeout,
         env=build_dfu_env(dfu_util),
     )
     trace(f"dfu-util -l stdout:\n{result.stdout.rstrip() or '<empty>'}")
     trace(f"dfu-util -l stderr:\n{result.stderr.rstrip() or '<empty>'}")
     return parse_dfu_devices(result.stdout)
-
 
 def select_fc_dfu_target(before_devices, after_devices):
     before_keys = {
@@ -318,16 +320,8 @@ def select_fc_dfu_target(before_devices, after_devices):
             return ["-d", target["usb_id"], "-S", target["serial"]]
         return ["-d", target["usb_id"]]
 
-    if not new_devices and len(after_devices) == 1:
-        target = after_devices[0]
-        if target["serial"]:
-            return ["-d", target["usb_id"], "-S", target["serial"]]
-        return ["-d", target["usb_id"]]
-
     if not new_devices:
-        raise RuntimeError(
-            "Could not identify a newly appeared DFU device after entering FC bootloader"
-        )
+        return None
 
     candidates = ", ".join(
         f'{device["usb_id"]} path={device["path"]} serial={device["serial"] or "<none>"}'
@@ -335,18 +329,62 @@ def select_fc_dfu_target(before_devices, after_devices):
     )
     raise RuntimeError(f"Multiple new DFU devices appeared after bootloader entry: {candidates}")
 
+def wait_for_fc_dfu_target(dfu_util, before_devices):
+    deadline = time.monotonic() + FC_DFU_WAIT_TIMEOUT
+    last_devices = []
+    last_error = None
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+
+        try:
+            last_devices = list_dfu_devices(
+                dfu_util,
+                timeout=min(FC_DFU_LIST_TIMEOUT, remaining),
+            )
+            trace(
+                "post-bl dfu-util -l parsed "
+                    f"{len(last_devices)} device(s): "
+                    f"{format_dfu_devices(last_devices)}"
+            )
+            last_error = None
+
+            target_args = select_fc_dfu_target(
+                before_devices,
+                last_devices,
+            )
+            if target_args is not None:
+                return target_args
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            last_error = exc
+            trace(
+                "transient dfu-util discovery failure: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(FC_DFU_POLL_INTERVAL, remaining))
+
+    message = (
+        f"Timed out after {FC_DFU_WAIT_TIMEOUT:.1f}s waiting for a new "
+        f"DFU device. Baseline: {format_dfu_devices(before_devices)}. "
+        f"Last scan: {format_dfu_devices(last_devices)}."
+    )
+    if last_error is not None:
+        message += f" Last scan error: {type(last_error).__name__}: {last_error}"
+
+    raise RuntimeError(message)
+
 
 def run_dfu_flash(dfu_util, firmware, before_devices):
     trace(
-        "post-bl dfu-util -l start "
+        "waiting for post-bl DFU device "
         f"(baseline={len(before_devices)} device(s): {format_dfu_devices(before_devices)})"
     )
-    after_devices = list_dfu_devices(dfu_util)
-    trace(
-        "post-bl dfu-util -l parsed "
-        f"{len(after_devices)} device(s): {format_dfu_devices(after_devices)}"
-    )
-    dfu_target_args = select_fc_dfu_target(before_devices, after_devices)
+    dfu_target_args = wait_for_fc_dfu_target(dfu_util, before_devices)
     trace(f"selected dfu target args: {dfu_target_args}")
     cmd = [
         str(dfu_util),
@@ -527,8 +565,6 @@ def put_fc_in_bootloader(port, baud):
         trace("sent bl")
     finally:
         serial_port.close()
-    trace(f"sleeping {FC_BOOTLOADER_DELAY}s after bl")
-    time.sleep(FC_BOOTLOADER_DELAY)
 
 
 def apply_fc_config(port, baud, config_file):
